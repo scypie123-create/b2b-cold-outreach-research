@@ -23,6 +23,7 @@ import argparse
 import json
 import re
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Iterable
 from urllib.error import URLError
@@ -81,8 +82,20 @@ def fetch_metadata(url: str) -> tuple[str, str]:
 
 def fetch_transcript(video_id: str) -> str:
     """Download transcript text for a video."""
-    entries = YouTubeTranscriptApi.get_transcript(video_id)
-    return "\n".join(clean_text(entry.get("text", "")) for entry in entries).strip()
+    if hasattr(YouTubeTranscriptApi, "get_transcript"):
+        entries = YouTubeTranscriptApi.get_transcript(video_id)
+    else:
+        entries = YouTubeTranscriptApi().fetch(video_id)
+
+    return "\n".join(clean_text(get_transcript_text(entry)) for entry in entries).strip()
+
+
+def get_transcript_text(entry: object) -> str:
+    """Read transcript text from old dict entries or newer snippet objects."""
+    if isinstance(entry, dict):
+        return str(entry.get("text", ""))
+
+    return str(getattr(entry, "text", ""))
 
 
 def clean_text(text: str) -> str:
@@ -107,6 +120,31 @@ def build_markdown(title: str, channel: str, url: str, transcript: str) -> str:
     )
 
 
+def build_failed_markdown(
+    title: str,
+    channel: str,
+    url: str,
+    attempted_on: str,
+    error: Exception,
+) -> str:
+    """Build the Markdown document for a transcript retrieval failure."""
+    return (
+        f"# {title}\n\n"
+        f"- **Channel:** {channel}\n"
+        f"- **URL:** {url}\n"
+        f"- **Date attempted:** {attempted_on}\n\n"
+        "## Transcript\n\n"
+        "Automatic transcript retrieval failed.\n\n"
+        "## Exact API Error\n\n"
+        f"{type(error).__name__}: {error}\n\n"
+        "## Suggested Next Step\n\n"
+        "Open the video on YouTube and check whether captions or a transcript are "
+        "available manually. If they are available, copy the transcript into this "
+        "file; if they are not available, choose another relevant video from the "
+        "same expert that has captions enabled.\n"
+    )
+
+
 def ensure_output_dir() -> None:
     """Create the output directory, unless a file already exists at that path."""
     if OUTPUT_DIR.exists() and not OUTPUT_DIR.is_dir():
@@ -121,10 +159,24 @@ def save_transcript(url: str) -> Path:
     """Download and save one video's transcript."""
     video_id = extract_video_id(url)
     title, channel = fetch_metadata(url)
-    transcript = fetch_transcript(video_id)
-
     filename = f"{slugify(title, video_id)}-{video_id}.md"
     output_path = OUTPUT_DIR / filename
+
+    try:
+        transcript = fetch_transcript(video_id)
+    except (
+        NoTranscriptFound,
+        TranscriptsDisabled,
+        VideoUnavailable,
+        CouldNotRetrieveTranscript,
+    ) as error:
+        output_path.write_text(
+            build_failed_markdown(title, channel, url, date.today().isoformat(), error),
+            encoding="utf-8",
+        )
+        print(f"Transcript unavailable; saved failure notes: {output_path}")
+        return output_path
+
     output_path.write_text(
         build_markdown(title, channel, url, transcript),
         encoding="utf-8",
